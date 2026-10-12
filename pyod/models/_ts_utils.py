@@ -68,6 +68,10 @@ def map_scores_to_timestamps(window_scores, window_size, step,
     counts = np.zeros(n_timestamps)
 
     for i, score in enumerate(window_scores):
+        # Non-finite window scores are undefined, not anomaly distances.
+        # Skipping them also keeps the mean denominator correct.
+        if not np.isfinite(score):
+            continue
         start = i * step
         end = min(start + window_size, n_timestamps)
         if aggregation == 'max':
@@ -86,7 +90,7 @@ def map_scores_to_timestamps(window_scores, window_size, step,
         mask = counts > 0
         scores[mask] /= counts[mask]
 
-    valid_mask = ~np.isnan(scores)
+    valid_mask = np.isfinite(scores)
     return scores, valid_mask
 
 

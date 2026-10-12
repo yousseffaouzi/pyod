@@ -21,8 +21,7 @@ import numpy as np
 from sklearn.utils.validation import check_is_fitted
 
 from .base import BaseDetector
-from ._ts_utils import (validate_ts_input, map_scores_to_timestamps,
-                         aggregate_channel_scores)
+from ._ts_utils import validate_ts_input, map_scores_to_timestamps
 
 
 def _compute_matrix_profile(T, m):
@@ -269,18 +268,44 @@ class MatrixProfile(BaseDetector):
         if n_channels == 1:
             scores, valid_mask = per_channel_ts_scores[0]
         else:
-            # Aggregate across channels
-            # First, fill NaN positions in each channel with 0 for aggregation
-            filled_scores = []
-            combined_valid = per_channel_ts_scores[0][1].copy()
+            # Normalize each channel using ONLY its finite observations.
+            # A completely unscorable channel must not invalidate other
+            # channels or bias their means by inserting artificial zeros.
+            normalized = []
             for ch_scores, ch_valid in per_channel_ts_scores:
-                filled = ch_scores.copy()
-                filled[~ch_valid] = 0.0
-                filled_scores.append(filled)
-                combined_valid &= ch_valid
-            scores = aggregate_channel_scores(
-                filled_scores, method=self.channel_aggregation)
-            valid_mask = combined_valid
+                if not np.any(ch_valid):
+                    continue
+                values = ch_scores[ch_valid]
+                mu, sigma = np.mean(values), np.std(values)
+                channel = np.full(n_timestamps, np.nan)
+                if sigma > 0:
+                    channel[ch_valid] = (values - mu) / sigma
+                else:
+                    channel[ch_valid] = values - mu
+                normalized.append(channel)
+
+            if normalized:
+                stacked = np.column_stack(normalized)
+                available = np.isfinite(stacked)
+                valid_mask = available.any(axis=1)
+                scores = np.full(n_timestamps, np.nan)
+                if self.channel_aggregation == 'max':
+                    masked = np.where(available, stacked, -np.inf)
+                    scores[valid_mask] = masked[valid_mask].max(axis=1)
+                else:  # mean
+                    totals = np.where(available, stacked, 0.0).sum(axis=1)
+                    counts = available.sum(axis=1)
+                    scores[valid_mask] = (totals[valid_mask]
+                                          / counts[valid_mask])
+            else:
+                scores = np.full(n_timestamps, np.nan)
+                valid_mask = np.zeros(n_timestamps, dtype=bool)
+
+        if not np.any(valid_mask):
+            raise ValueError(
+                "MatrixProfile cannot score this input: no finite "
+                "subsequence distances are available. Check for "
+                "constant windows and non-trivial neighbors.")
 
         # Masked-score workflow: compute threshold on valid scores only
         valid_scores = scores[valid_mask]
